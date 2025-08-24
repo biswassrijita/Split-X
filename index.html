@@ -1632,5 +1632,208 @@
             });
         });
     </script>
+    <script>
+        (function() {
+            const API_BASE = (window.API_BASE || localStorage.getItem('API_BASE') || (location.origin)).replace(/\/+$/, '');
+            async function apiFetch(path, { method = 'GET', body, headers } = {}) {
+                const res = await fetch(API_BASE + path, {
+                    method,
+                    headers: { 'Content-Type': 'application/json', ...(headers || {}) },
+                    body: body ? JSON.stringify(body) : undefined,
+                });
+                const text = await res.text();
+                let data = null;
+                try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+                if (!res.ok) throw new Error(data?.error || res.statusText || 'Request failed');
+                return data;
+            }
+            const backend = {
+                createUser: (name, email) => apiFetch('/users', { method: 'POST', body: { name, email } }),
+                listUsers: () => apiFetch('/users'),
+                createGroup: (name, members) => apiFetch('/groups', { method: 'POST', body: { name, members } }),
+                listGroups: () => apiFetch('/groups'),
+                getGroup: (groupId) => apiFetch(`/groups/${groupId}`),
+                addExpense: (payload) => apiFetch('/expenses', { method: 'POST', body: payload }),
+                listGroupExpenses: (groupId) => apiFetch(`/expenses/group/${groupId}`),
+                getSettlements: (groupId) => apiFetch(`/settlements/${groupId}`),
+                chatbot: (message) => apiFetch('/chatbot', { method: 'POST', body: { message } }),
+            };
+
+            const local = {
+                createUser, updateUser, deleteUser,
+                loadGroups, createGroup, loadGroupDetails,
+                addMemberToGroup, addExpense, loadExpenses,
+                deleteExpense, addTransaction, loadSettlements,
+                addBotResponse
+            };
+
+            window.createUser = async function(name, email) {
+                try {
+                    const user = await backend.createUser(name, email);
+                    currentUser = { id: user._id, name: user.name, email: user.email, trustScore: user.trustScore ?? 100, badges: user.badges ?? [] };
+                    localStorage.setItem('currentUser', JSON.stringify(currentUser));
+                    showMessage('Account created successfully!', 'success');
+                    hideCreateUserModal?.();
+                    enterApp();
+                } catch (e) {
+                    return local.createUser(name, email);
+                }
+            };
+
+            window.updateUser = async function(name, email) {
+                try {
+                    if (!currentUser?.id) return local.updateUser(name, email);
+                    const updated = await apiFetch(`/users/${currentUser.id}`, { method: 'PUT', body: { name, email, trustScore: currentUser.trustScore, badges: currentUser.badges } });
+                    currentUser = { id: updated._id, name: updated.name, email: updated.email, trustScore: updated.trustScore ?? 100, badges: updated.badges ?? [] };
+                    localStorage.setItem('currentUser', JSON.stringify(currentUser));
+                    showMessage('Profile updated successfully!', 'success');
+                } catch (e) {
+                    return local.updateUser(name, email);
+                }
+            };
+
+            window.deleteUser = async function() {
+                if (!confirm('Are you sure you want to delete your account? This action cannot be undone.')) return;
+                try {
+                    if (currentUser?.id) await apiFetch(`/users/${currentUser.id}`, { method: 'DELETE' });
+                    localStorage.removeItem('currentUser');
+                    currentUser = null;
+                    showMessage('Account deleted successfully', 'success');
+                    showLanding();
+                } catch (e) {
+                    return local.deleteUser();
+                }
+            };
+
+            window.loadGroups = async function() {
+                try {
+                    const list = await backend.listGroups();
+                    groups = (list || []).map(g => ({
+                        id: g._id,
+                        name: g.name,
+                        members: g.memberNames || [],
+                        expenses: [],
+                        transactions: [],
+                        createdAt: g.createdAt
+                    }));
+                    renderGroups?.();
+                    renderRecentGroups?.();
+                } catch (e) {
+                    return local.loadGroups();
+                }
+            };
+
+            window.createGroup = async function(name, membersCsvOrArr) {
+                try {
+                    const arr = Array.isArray(membersCsvOrArr) ? membersCsvOrArr : (membersCsvOrArr || '').split(',').map(m => m.trim()).filter(Boolean);
+                    await backend.createGroup(name, arr);
+                    showMessage('Group created successfully!', 'success');
+                    hideCreateGroup?.();
+                    showSuccess?.();
+                    await loadGroups();
+                } catch (e) {
+                    return local.createGroup(name, membersCsvOrArr);
+                }
+            };
+
+            window.loadGroupDetails = async function(groupId) {
+                try {
+                    const data = await backend.getGroup(groupId);
+                    currentGroup = {
+                        id: data._id,
+                        name: data.name,
+                        members: data.memberNames || [],
+                        expenses: (data.expenses || []).map(e => ({ id: e._id, amount: e.amount, description: e.description, paidBy: e.paidBy, groupId: data._id, date: e.date })),
+                        transactions: []
+                    };
+                    renderGroupDetails?.();
+                    showAppPage?.('group-details');
+                } catch (e) {
+                    return local.loadGroupDetails(groupId);
+                }
+            };
+
+            window.addMemberToGroup = async function(groupId, memberName) {
+                try {
+                    await apiFetch(`/groups/${groupId}/members`, { method: 'POST', body: { name: memberName } });
+                    showMessage('Member added successfully!', 'success');
+                    hideAddMember?.();
+                    await loadGroupDetails(groupId);
+                } catch (e) {
+                    return local.addMemberToGroup(groupId, memberName);
+                }
+            };
+
+            window.addExpense = async function(amount, description, paidBy, groupId) {
+                try {
+                    const payload = { amount: parseFloat(amount), description, paidBy, groupId };
+                    await backend.addExpense(payload);
+                    showMessage('Expense added!', 'success');
+                    hideAddExpense?.();
+                    await loadExpenses();
+                    if (currentGroup?.id === groupId) await loadGroupDetails(groupId);
+                } catch (e) {
+                    return local.addExpense(amount, description, paidBy, groupId);
+                }
+            };
+
+            window.loadExpenses = async function() {
+                try {
+                    expenses = [];
+                    if (groups?.length) {
+                        for (const g of groups) {
+                            const list = await backend.listGroupExpenses(g.id);
+                            expenses.push(...list.map(e => ({ id: e._id, amount: e.amount, description: e.description, paidBy: e.paidBy, groupId: g.id, date: e.date })));
+                        }
+                    }
+                    renderExpenses?.();
+                } catch (e) {
+                    return local.loadExpenses();
+                }
+            };
+
+            window.deleteExpense = async function(expenseId) {
+                try {
+                    await apiFetch(`/expenses/${expenseId}`, { method: 'DELETE' });
+                    showMessage('Expense deleted successfully!', 'success');
+                    await loadExpenses();
+                    if (currentGroup?.id) await loadGroupDetails(currentGroup.id);
+                } catch (e) {
+                    return local.deleteExpense(expenseId);
+                }
+            };
+
+            window.loadSettlements = async function() {
+                try {
+                    if (!currentGroup?.id) return local.loadSettlements();
+                    // Optionally call backend.getSettlements(currentGroup.id) and render a UI
+                    return local.loadSettlements();
+                } catch (e) {
+                    return local.loadSettlements();
+                }
+            };
+
+            window.addBotResponse = async function(userMessage) {
+                const messagesContainer = document.getElementById('chat-messages');
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'flex items-start space-x-2';
+                let response;
+                try {
+                    const data = await backend.chatbot(userMessage);
+                    response = data?.reply;
+                } catch (e) {
+                    response = (typeof getBotResponse === 'function') ? getBotResponse(userMessage) : 'Hi!';
+                }
+                messageDiv.innerHTML = `
+                    <div class="w-6 h-6 bg-splitx-green rounded-full flex items-center justify-center text-white text-xs">🤖</div>
+                    <div class="bg-gray-100 rounded-2xl rounded-tl-sm p-3 max-w-xs">
+                        <p class="text-sm text-gray-800">${response}</p>
+                    </div>
+                `;
+                messagesContainer.appendChild(messageDiv);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            };
+        })();
+    </script>
 <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'973ad4cda481ffa1',t:'MTc1NTk1NDQyOS4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
