@@ -1522,6 +1522,31 @@
             });
         });
 
+        // Backend API helpers (minimal, non-breaking)
+        const API_BASE = (window.API_BASE || localStorage.getItem('API_BASE') || 'http://localhost:4000').replace(/\/+$/, '');
+        async function apiFetch(path, { method = 'GET', body, headers } = {}) {
+            const res = await fetch(`${API_BASE}${path}`, {
+                method,
+                headers: { 'Content-Type': 'application/json', ...(headers || {}) },
+                body: body ? JSON.stringify(body) : undefined,
+            });
+            const text = await res.text();
+            let data = null;
+            try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+            if (!res.ok) throw new Error(data?.error || res.statusText || 'Request failed');
+            return data;
+        }
+        const backend = {
+            createUser: (name, email) => apiFetch('/users', { method: 'POST', body: { name, email } }),
+            listUsers: () => apiFetch('/users'),
+            createGroup: (name, memberIds) => apiFetch('/groups', { method: 'POST', body: { name, members: memberIds } }),
+            getGroup: (groupId) => apiFetch(`/groups/${groupId}`),
+            addExpense: (payload) => apiFetch('/expenses', { method: 'POST', body: payload }),
+            listGroupExpenses: (groupId) => apiFetch(`/groups/${groupId}/expenses`),
+            getSettlements: (groupId) => apiFetch(`/groups/${groupId}/settlements`),
+            chatbot: (message) => apiFetch('/chatbot', { method: 'POST', body: { message } }),
+        };
+
         // Chatbot Functions
         function toggleChatbot() {
             const chatWindow = document.getElementById('chatbot-window');
@@ -1571,12 +1596,18 @@
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
-        function addBotResponse(userMessage) {
+        async function addBotResponse(userMessage) {
             const messagesContainer = document.getElementById('chat-messages');
             const messageDiv = document.createElement('div');
             messageDiv.className = 'flex items-start space-x-2';
             
-            let response = getBotResponse(userMessage);
+            let response;
+            try {
+                const data = await backend.chatbot(userMessage);
+                response = data?.reply || getBotResponse(userMessage);
+            } catch (e) {
+                response = getBotResponse(userMessage);
+            }
             
             messageDiv.innerHTML = `
                 <div class="w-6 h-6 bg-splitx-green rounded-full flex items-center justify-center text-white text-xs">🤖</div>
